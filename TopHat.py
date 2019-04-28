@@ -6,12 +6,10 @@ Created on Thu Apr 25 12:01:58 2019
 @author: nickofca
 """
 
-#import keras
+import keras
 import spacy
 import numpy as np
 import os
-#import scipy
-import pickle
 
 class flag(object):
     def __init__(self,name="Flag"):
@@ -38,6 +36,8 @@ class DocSet(object):
         self.tensorList = []
         self.labelList = []
         self.nAnn = 0
+        self.nVec = 0
+        self.UnicodeFail = 0
     
     def clean(self,string):
         try:
@@ -51,25 +51,31 @@ class DocSet(object):
         for fileNum,filename in enumerate(os.listdir(self.docDir)):
             fileFlag.add(length=len(os.listdir(self.docDir)))
             if filename.endswith(".txt"): 
-                with open(os.path.join(self.docDir,filename),"r", encoding="ISO-8859-1") as file:
+                with open(os.path.join(self.docDir,filename),"r") as file:
                     #Create annotations tags
+                    #Reload data
                     with open(os.path.join(self.docDir,filename)[:-3]+"ann","r", encoding="ISO-8859-1") as annFile:
+                        #Be sure that embeddings seperate by sentence
+                        #For some reason it returns document wide
+                        sentFlag = flag("  Sent")
+                        print(filename)
+                        try:
+                            #get the raw literas strings
+                            text = file.read().encode('unicode_escape').decode()
+                            sents = list(self.nlp(text).sents)
+                        except UnicodeDecodeError:
+                            self.UnicodeFail = self.UnicodeFail + 1
+                            continue
+
                         locStart = []
                         locFinish = []
                         for line in annFile:
                             #exclude annotatorNotes
                             if line[0] != "T":
                                 continue
-                            if line.split()[0]=="T26" and line.split()[2]=="45708":
-                                print(line)
                             locStart.append(self.clean(line.split()[2]))
                             locFinish.append(self.clean(line.split()[3]))
                             self.nAnn = self.nAnn +1
-                            
-                    #Be sure that embeddings seperate by sentence
-                    #For some reason it returns document wide
-                    sentFlag = flag("  Sent")
-                    sents = list(self.nlp(file.read()).sents)
                    
                     for sent in sents:
                         sentFlag.add(length=len(sents))
@@ -86,15 +92,18 @@ class DocSet(object):
                                 if j+1 == self.wordLen:
                                     break
                             #Index of word & chars in doc
+                            if filename == "12857911.txt" and word.idx>8300:
+                                print("ping")
                             index = word.i
                             wstart = word.idx
-                            wstop = wstart + len(word)-1
+                            wstop = wstart + len(word)
                             label = 0
                             if wstart in locStart:
                                 label = label + 1
                             if wstop in locFinish:
                                 label = label + 2
                             #Concat with spacy word vec
+                            if word.has_vector: self.nVec = self.nVec + 1
                             sentArray[i,:] = np.concatenate((word.vector,charVec,[index,wstart,wstop]))
                             labelArray[i,label] = 1
                             #Prevent overflow of sentence
@@ -109,9 +118,9 @@ class DocSet(object):
         self.tensor = np.array(self.tensorList)
         self.labels = np.array(self.labelList)
 
-'''
+
 class TopFind(object):
-    def __init__(self,sent_len=60,width=128,lr=0.001):
+    def __init__(self,vectors="en_vectors_web_lg",sent_len=60,width=128,lr=0.001):
         self.nlp = spacy.load(vectors)
         self.sent_len = sent_len
         self.width = width
@@ -121,28 +130,31 @@ class TopFind(object):
         self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
         self.embeddings = self.nlp.vocab.vectors.data
      
-    def train(self,X,Y,epochs=self.epochs,callbacks=self.callbacks):
+    def train(self,X,Y,epochs=10,callbacks=None):
         inputs = keras.Input((self.sent_len))
-        layer = keras.layers.Embedding(self.embeddings.shape[0],self.embeddings.shape[1],
+        x = keras.layers.Embedding(self.embeddings.shape[0],self.embeddings.shape[1],
                                        input_length = self.sent_len, trainable = False,
                                        weights = [self.embeddings], mask_zero = True)(inputs)
         x = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(x)
         x = keras.layers.Bidirectional(keras.layers.GRU(self.width))(x)
-        x = keras.layers.Dense(1, activation = "sigmoid")(x)
+        x = keras.layers.Dense(4, activation = "sigmoid")(x)
         self.model = keras.Model(inputs = inputs, outputs = x)
         self.model.compile(keras.optimizers.Adam(lr = self.lr),loss = "mse")
         #Train model
         self.model.fit(X,Y,epochs=epochs,callbacks=callbacks)
         self.model.save("models/model.h5")
          
-    def predict(X,model=self.model,loadFrom=None):
+    def predict(self,X,loadFrom=None):
+        if self.model is None:
+            loadFrom = None
         if loadFrom is not None:
             self.model = keras.models.load_model(loadFrom)
         #Run through preprocess
-        self.model.predict(featVec)
-  '''   
+        self.model.predict(X)
+        
  
 if __name__ == "__main__":
-    tenGen = DocSet("Training_Data_Participant")
-    tenGen.tensorGen()
+    trainGen = DocSet("train")
+    trainGen.tensorGen()
+    trainGen.tensor
          
