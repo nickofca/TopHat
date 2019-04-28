@@ -27,7 +27,7 @@ class flag(object):
 
 class DocSet(object):
     #Consider a better way to incorporate new words to vocab
-    def __init__(self,docDir,vectors="en_vectors_web_lg",sentLen=15,wordLen=20):
+    def __init__(self,docDir,vectors="en_vectors_web_lg",sentLen=20,wordLen=20):
         self.docDir = docDir
         self.nlp = spacy.load(vectors)
         self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
@@ -61,27 +61,25 @@ class DocSet(object):
                         print(filename)
                         try:
                             #get the raw literas strings
-                            text = file.read().encode('unicode_escape').decode()
+                            text = file.read()
                             sents = list(self.nlp(text).sents)
                         except UnicodeDecodeError:
                             self.UnicodeFail = self.UnicodeFail + 1
                             continue
 
-                        locStart = []
-                        locFinish = []
+                        topList = []
                         for line in annFile:
                             #exclude annotatorNotes
                             if line[0] != "T":
                                 continue
-                            locStart.append(self.clean(line.split()[2]))
-                            locFinish.append(self.clean(line.split()[3]))
+                            topList.append(line.split()[4])
                             self.nAnn = self.nAnn +1
                    
                     for sent in sents:
                         sentFlag.add(length=len(sents))
                         #max char length of word plus spacy 300 length vector
-                        sentArray = np.zeros((self.sentLen,self.wordLen+303),"int32")
-                        labelArray = np.zeros((self.sentLen,4),"int32")
+                        sentArray = np.zeros((self.sentLen,self.wordLen+302),"int32")
+                        labelArray = np.zeros((self.sentLen,1),"int32")
                         
                         for i,word in enumerate(sent):
                             #Get the octal char reading
@@ -92,20 +90,15 @@ class DocSet(object):
                                 if j+1 == self.wordLen:
                                     break
                             #Index of word & chars in doc
-                            if filename == "12857911.txt" and word.idx>8300:
+                            if filename == "2780295.txt" :
                                 print("ping")
                             index = word.i
-                            wstart = word.idx
-                            wstop = wstart + len(word)
-                            label = 0
-                            if wstart in locStart:
-                                label = label + 1
-                            if wstop in locFinish:
-                                label = label + 2
+                            wstart = word.idx+1
+                            if word.text in topList:
+                                labelArray[i,0] = 1
                             #Concat with spacy word vec
                             if word.has_vector: self.nVec = self.nVec + 1
-                            sentArray[i,:] = np.concatenate((word.vector,charVec,[index,wstart,wstop]))
-                            labelArray[i,label] = 1
+                            sentArray[i,:] = np.concatenate((word.vector,charVec,[index,wstart]))
                             #Prevent overflow of sentence
                             if i+1 == self.sentLen:
                                 break
@@ -120,24 +113,20 @@ class DocSet(object):
 
 
 class TopFind(object):
-    def __init__(self,vectors="en_vectors_web_lg",sent_len=60,width=128,lr=0.001):
+    def __init__(self,vectors="en_vectors_web_lg",sent_len=20,width=128,lr=0.001):
         self.nlp = spacy.load(vectors)
         self.sent_len = sent_len
         self.width = width
         self.lr = lr
      
-    def preprocess(self):
-        self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
-        self.embeddings = self.nlp.vocab.vectors.data
-     
     def train(self,X,Y,epochs=10,callbacks=None):
-        inputs = keras.Input((self.sent_len))
+        inputs = keras.Input((self.sent_len,302))
         x = keras.layers.Embedding(self.embeddings.shape[0],self.embeddings.shape[1],
                                        input_length = self.sent_len, trainable = False,
                                        weights = [self.embeddings], mask_zero = True)(inputs)
         x = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(x)
         x = keras.layers.Bidirectional(keras.layers.GRU(self.width))(x)
-        x = keras.layers.Dense(4, activation = "sigmoid")(x)
+        x = keras.layers.TimeDistributed(keras.layers.Dense(1))(x)
         self.model = keras.Model(inputs = inputs, outputs = x)
         self.model.compile(keras.optimizers.Adam(lr = self.lr),loss = "mse")
         #Train model
@@ -154,7 +143,16 @@ class TopFind(object):
         
  
 if __name__ == "__main__":
-    trainGen = DocSet("train")
-    trainGen.tensorGen()
-    trainGen.tensor
+    try:
+        trainGen
+        print("Data already loaded")
+    except NameError:
+        trainGen = DocSet("train")
+        trainGen.tensorGen()
+        testGen = DocSet("test")
+        testGen.tensorGen()
+    model = TopFind()
+    model.train(trainGen.tensor,trainGen.labels)
+    testPred = model.predict(testGen.tensor)
+    
          
