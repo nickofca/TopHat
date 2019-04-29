@@ -10,6 +10,7 @@ import keras
 import spacy
 import numpy as np
 import os
+import math
 
 class flag(object):
     def __init__(self,name="Flag"):
@@ -33,7 +34,8 @@ class DocSet(object):
         self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
         self.sentLen = sentLen
         self.wordLen = wordLen
-        self.tensorList = []
+        self.vectList = []
+        self.encodeList = []
         self.labelList = []
         self.nAnn = 0
         self.nVec = 0
@@ -78,7 +80,8 @@ class DocSet(object):
                     for sent in sents:
                         sentFlag.add(length=len(sents))
                         #max char length of word plus spacy 300 length vector
-                        sentArray = np.zeros((self.sentLen,self.wordLen+302),"int32")
+                        vectArray = np.zeros((self.sentLen,300),"int32")
+                        encodeArray = np.zeros((self.sentLen,self.wordLen+2))
                         labelArray = np.zeros((self.sentLen,1),"int32")
                         
                         for i,word in enumerate(sent):
@@ -98,51 +101,78 @@ class DocSet(object):
                                 labelArray[i,0] = 1
                             #Concat with spacy word vec
                             if word.has_vector: self.nVec = self.nVec + 1
-                            sentArray[i,:] = np.concatenate((word.vector,charVec,[index,wstart]))
+                            vectArray[i,:] = word.vector
+                            encodeArray[i,:] = np.concatenate((charVec,[index,wstart]))
                             #Prevent overflow of sentence
                             if i+1 == self.sentLen:
                                 break
                         
                         #Join sentArray to tensor
                         self.labelList.append(labelArray)
-                        self.tensorList.append(sentArray)
+                        self.vectList.append(vectArray)
+                        self.encodeList.append(encodeArray)
                         
         
-        self.tensor = np.array(self.tensorList)
+        self.encodings = np.array(self.encodeList)
+        self.vectors = np.array(self.vectList)
         self.labels = np.array(self.labelList)
 
 
 class TopFind(object):
     def __init__(self,vectors="en_vectors_web_lg",sent_len=20,width=128,lr=0.001):
         self.nlp = spacy.load(vectors)
+        self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
         self.sent_len = sent_len
         self.width = width
         self.lr = lr
+        self.embeddings = self.nlp.vocab.vectors.data
      
-    def train(self,X,Y,epochs=10,callbacks=None):
-        inputs = keras.Input((self.sent_len,302))
-        x = keras.layers.Embedding(self.embeddings.shape[0],self.embeddings.shape[1],
-                                       input_length = self.sent_len, trainable = False,
-                                       weights = [self.embeddings], mask_zero = True)(inputs)
-        x = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(x)
-        x = keras.layers.Bidirectional(keras.layers.GRU(self.width))(x)
-        x = keras.layers.TimeDistributed(keras.layers.Dense(1))(x)
-        self.model = keras.Model(inputs = inputs, outputs = x)
+    def train(self,X1,X2,Y,epochs=10,callbacks=None):
+        inputsA = keras.Input((self.sent_len,22))
+        xA = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(inputsA)
+        modelA = keras.Model(inputs = inputsA, outputs = xA)
+        keras.utils.plot_model(modelA, to_file="modelA.png",show_shapes=True)        
+        
+        inputsB = keras.Input((self.sent_len,300))
+        xB = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(inputsB)
+        modelB = keras.Model(inputs = inputsB, outputs = xB)
+        keras.utils.plot_model(modelB, to_file="modelB.png",show_shapes=True)
+        
+        combination = keras.layers.concatenate([modelA.output,modelB.output])
+        x = keras.layers.Bidirectional(keras.layers.GRU(self.width,return_sequences=True))(combination)
+        x = keras.layers.TimeDistributed(keras.layers.Dense(1, activation = "sigmoid"))(x)
+        self.model = keras.Model(inputs = [modelA.input,modelB.input], outputs = x)
+        keras.utils.plot_model(self.model, to_file="model.png",show_shapes=True)
         self.model.compile(keras.optimizers.Adam(lr = self.lr),loss = "mse")
         #Train model
-        self.model.fit(X,Y,epochs=epochs,callbacks=callbacks)
+        self.model.fit([X1,X2],Y,epochs=epochs,callbacks=callbacks)
         self.model.save("models/model.h5")
          
-    def predict(self,X,loadFrom=None):
+    def predict(self,X1,X2,loadFrom=None):
         if self.model is None:
             loadFrom = None
         if loadFrom is not None:
             self.model = keras.models.load_model(loadFrom)
         #Run through preprocess
-        self.model.predict(X)
+        return self.model.predict([X1,X2])
         
- 
+def threshGrid(testPred,testGen):
+    F1 = 0
+    for i in range(0,100):
+        thresh = i/100
+        print(thresh)
+        testPredBinary = testPred>thresh
+        rawAcc = np.sum(testGen.labels==testPredBinary)/(np.prod(testPred.shape))
+        precision = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testPredBinary)
+        recall = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testGen.labels)
+        if F1<2*precision*recall/(precision+recall):
+            F1 = 2*precision*recall/(precision+recall)
+    return F1
+
 if __name__ == "__main__":
+    train = False
+    predict = False
+    
     try:
         trainGen
         print("Data already loaded")
@@ -151,8 +181,16 @@ if __name__ == "__main__":
         trainGen.tensorGen()
         testGen = DocSet("test")
         testGen.tensorGen()
-    model = TopFind()
-    model.train(trainGen.tensor,trainGen.labels)
-    testPred = model.predict(testGen.tensor)
-    
+    if train:
+        model = TopFind()
+    if predict:
+        model.train(trainGen.encodings,trainGen.vectors,trainGen.labels)
+        testPred = model.predict(testGen.encodings,testGen.vectors)
+    thresh = threshGrid(testPred,testGen)
+    testPredBinary = testPred>thresh
+    rawAcc = sum(sum(testGen.labels==testPredBinary))/(np.prod(testPred.shape))
+    precision = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testPredBinary)
+    recall = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testGen.labels)
+    F1 = 2*precision*recall/(precision+recall)
+
          
