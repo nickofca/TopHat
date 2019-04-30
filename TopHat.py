@@ -10,7 +10,6 @@ import keras
 import spacy
 import numpy as np
 import os
-import math
 
 class flag(object):
     def __init__(self,name="Flag"):
@@ -59,8 +58,6 @@ class DocSet(object):
                     with open(os.path.join(self.docDir,filename)[:-3]+"ann","r", encoding="ISO-8859-1") as annFile:
                         #Be sure that embeddings seperate by sentence
                         #For some reason it returns document wide
-                        sentFlag = flag("  Sent")
-                        print(filename)
                         try:
                             #get the raw literas strings
                             text = file.read()
@@ -78,9 +75,8 @@ class DocSet(object):
                             self.nAnn = self.nAnn +1
                    
                     for sent in sents:
-                        sentFlag.add(length=len(sents))
                         #max char length of word plus spacy 300 length vector
-                        vectArray = np.zeros((self.sentLen,300),"int32")
+                        vectArray = np.zeros((self.sentLen),"int32")
                         encodeArray = np.zeros((self.sentLen,self.wordLen+2))
                         labelArray = np.zeros((self.sentLen,1),"int32")
                         
@@ -90,18 +86,19 @@ class DocSet(object):
                             for j,char in enumerate(word.text):
                                 charVec[j] = ord(char)
                                 #Prevent overflow of word
+                                if ord(char) >377:
+                                    charVec[j] = 0
                                 if j+1 == self.wordLen:
                                     break
                             #Index of word & chars in doc
-                            if filename == "2780295.txt" :
-                                print("ping")
                             index = word.i
                             wstart = word.idx+1
                             if word.text in topList:
                                 labelArray[i,0] = 1
                             #Concat with spacy word vec
                             if word.has_vector: self.nVec = self.nVec + 1
-                            vectArray[i,:] = word.vector
+                            vectArray[i] = word.vocab.vectors.find(key=word.orth)
+                            if vectArray[i] == -1: vectArray[i] = 0
                             encodeArray[i,:] = np.concatenate((charVec,[index,wstart]))
                             #Prevent overflow of sentence
                             if i+1 == self.sentLen:
@@ -119,42 +116,56 @@ class DocSet(object):
 
 
 class TopFind(object):
-    def __init__(self,vectors="en_vectors_web_lg",sent_len=20,width=128,lr=0.001):
+    def __init__(self,vectors="en_vectors_web_lg",sent_len=20,word_len=20,width=32,lr=0.02):
         self.nlp = spacy.load(vectors)
         self.nlp.add_pipe(self.nlp.create_pipe('sentencizer'))
         self.sent_len = sent_len
+        self.word_len = word_len
         self.width = width
         self.lr = lr
         self.embeddings = self.nlp.vocab.vectors.data
      
-    def train(self,X1,X2,Y,epochs=10,callbacks=None):
-        inputsA = keras.Input((self.sent_len,22))
-        xA = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(inputsA)
+    def train(self,X1,X2,Y,epochs=25,callbacks=None):
+        #embedding for each character in octal (0-377)
+        inputsA = keras.Input((self.sent_len,self.word_len))
+        xA = keras.layers.Embedding(input_dim=378,output_dim=5)(inputsA)
+        xA = keras.layers.TimeDistributed(keras.layers.Bidirectional(keras.layers.GRU(self.width,return_sequences=False,activation = "relu")))(xA)
         modelA = keras.Model(inputs = inputsA, outputs = xA)
         keras.utils.plot_model(modelA, to_file="modelA.png",show_shapes=True)        
         
-        inputsB = keras.Input((self.sent_len,300))
-        xB = keras.layers.TimeDistributed(keras.layers.Dense(self.width))(inputsB)
+        #embedding for spaCy vectors
+        inputsB = keras.Input((self.sent_len,))
+        xB = keras.layers.Embedding(self.embeddings.shape[0],self.embeddings.shape[1],
+                           input_length = self.sent_len, trainable = False,
+                           weights = [self.embeddings], mask_zero = True)(inputsB)
+        xB = keras.layers.TimeDistributed(keras.layers.Dense(self.width,activation = "relu"))(xB)
         modelB = keras.Model(inputs = inputsB, outputs = xB)
         keras.utils.plot_model(modelB, to_file="modelB.png",show_shapes=True)
         
-        combination = keras.layers.concatenate([modelA.output,modelB.output])
-        x = keras.layers.Bidirectional(keras.layers.GRU(self.width,return_sequences=True))(combination)
-        x = keras.layers.TimeDistributed(keras.layers.Dense(1, activation = "sigmoid"))(x)
-        self.model = keras.Model(inputs = [modelA.input,modelB.input], outputs = x)
+        #inputs for indexing and wstart
+        inputsC = keras.Input((self.sent_len,2))
+        #xC = keras.layers.TimeDistributed(keras.layers.Dense(self.width,activation = "relu"))(inputsC)
+        #modelC = keras.Model(inputs = inputsC, outputs = xC)
+        #keras.utils.plot_model(modelC, to_file="modelC.png",show_shapes=True)        
+        
+        combination = keras.layers.concatenate([modelA.output,modelB.output,inputsC])
+        x = keras.layers.Bidirectional(keras.layers.GRU(self.width,return_sequences=True))(xB)
+        x = keras.layers.TimeDistributed(keras.layers.Dense(1, activation = "sigmoid",kernel_regularizer = keras.regularizers.l1()))(x)
+        self.model = keras.Model(inputs = [modelA.input,modelB.input,inputsC], outputs = x)
         keras.utils.plot_model(self.model, to_file="model.png",show_shapes=True)
         self.model.compile(keras.optimizers.Adam(lr = self.lr),loss = "mse")
         #Train model
-        self.model.fit([X1,X2],Y,epochs=epochs,callbacks=callbacks)
+        self.model.fit([X1[:,:,:20],X2,X1[:,:,20:]],Y,epochs=epochs,callbacks=callbacks,batch_size=256)
         self.model.save("models/model.h5")
+        
+        def trainCont(self,X1,X2,Y,epochs=20):
+            self.model.fit([X1[:,:,:20],X2,X1[:,:,20:]],Y,epochs=epochs,callbacks=callbacks,batch_size=256)
          
     def predict(self,X1,X2,loadFrom=None):
-        if self.model is None:
-            loadFrom = None
         if loadFrom is not None:
             self.model = keras.models.load_model(loadFrom)
         #Run through preprocess
-        return self.model.predict([X1,X2])
+        return self.model.predict(X2)
         
 def threshGrid(testPred,testGen):
     F1 = 0
@@ -162,16 +173,20 @@ def threshGrid(testPred,testGen):
         thresh = i/100
         print(thresh)
         testPredBinary = testPred>thresh
-        rawAcc = np.sum(testGen.labels==testPredBinary)/(np.prod(testPred.shape))
+        print(np.sum(testPredBinary))
+        print(F1)
+        if np.sum(testPredBinary) == 0:
+            break
         precision = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testPredBinary)
         recall = np.sum(np.logical_and(testGen.labels,testPredBinary))/np.sum(testGen.labels)
         if F1<2*precision*recall/(precision+recall):
             F1 = 2*precision*recall/(precision+recall)
-    return F1
+            topThresh = thresh
+    return topThresh
 
 if __name__ == "__main__":
-    train = False
-    predict = False
+    train = True
+    predict = True
     
     try:
         trainGen
@@ -181,11 +196,11 @@ if __name__ == "__main__":
         trainGen.tensorGen()
         testGen = DocSet("test")
         testGen.tensorGen()
+    model = TopFind()
     if train:
-        model = TopFind()
-    if predict:
         model.train(trainGen.encodings,trainGen.vectors,trainGen.labels)
-        testPred = model.predict(testGen.encodings,testGen.vectors)
+    if predict:
+        testPred = model.predict(testGen.encodings,testGen.vectors,loadFrom="models/model.h5")
     thresh = threshGrid(testPred,testGen)
     testPredBinary = testPred>thresh
     rawAcc = sum(sum(testGen.labels==testPredBinary))/(np.prod(testPred.shape))
